@@ -1,0 +1,1989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Makerspace Inventory Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- PDF Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Expose Firebase functions globally for the main script block
+        window.firebase = {
+            initializeApp,
+            getAuth,
+            signInAnonymously,
+            signInWithCustomToken,
+            getFirestore,
+            doc,
+            setDoc,
+            onSnapshot,
+            setLogLevel
+        };
+    </script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- Chosen Palette: Warm Neutrals -->
+    <!-- Application Structure Plan: A task-oriented dashboard with five main views: 'Overview', 'Inventory Details', 'Maintenance Log', 'Print Requests', and 'Class Usage'. This structure was chosen to provide a layered information experience, now segmented by function: high-level metrics (Overview), stock management (Inventory), machine care (Maintenance), workflow management (Requests), and operational cost analysis (Class Usage). This layered approach prioritizes efficient task completion for different user needs. -->
+    <!-- Visualization & Content Choices: 
+        - Key Metrics (Total Value, Low Stock, Pending Requests): Goal: Inform -> Presentation: HTML/CSS 'Big Number' Cards -> Interaction: Dynamic update -> Justification: Provides immediate, scannable insights into key operational numbers.
+        - Inventory Value by Category: Goal: Compare -> Presentation: Donut Chart (Chart.js) -> Interaction: Hover tooltips -> Justification: Effectively shows the cost distribution across different machine categories.
+        - Stock Status Breakdown: Goal: Compare -> Presentation: Bar Chart (Chart.js) -> Interaction: Hover tooltips -> Justification: Gives a quick, visual summary of overall stock health.
+        - Monthly Operational Cost Breakdown: Goal: Change/Compare -> Presentation: Stacked Bar Chart (Chart.js) -> Interaction: Hover tooltips -> Justification: Tracks and compares material and maintenance spending trends over time.
+        - Class Cost Correlation: Goal: Relationship/Change -> Presentation: Combined Bar/Line Chart (Chart.js) -> Interaction: Hover tooltips -> Justification: Visually correlates class usage frequency with total operational costs on a monthly basis.
+        - Detailed Inventory & Logs: Goal: Organize -> Presentation: Interactive HTML Tables and Forms -> Interaction: Filtering, sorting, direct input editing, deletion, and form submission -> Justification: Allows for deep exploration and management of the underlying data and workflow.
+        - All visualizations are rendered on Canvas, adhering to the requirements.
+    -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f5f5f5; /* Light Warm Gray */
+            color: #424242; /* Dark Gray Text */
+        }
+        .chart-container {
+            position: relative;
+            width: 100%;
+            max-width: 400px;
+            margin-left: auto;
+            margin-right: auto;
+            height: 300px;
+            max-height: 400px;
+        }
+        @media (min-width: 768px) {
+            .chart-container {
+                height: 350px;
+            }
+        }
+        .nav-btn {
+            transition: all 0.3s ease;
+        }
+        .nav-btn.active {
+            background-color: #A1887F; /* Muted Brown */
+            color: #ffffff;
+            font-weight: 600;
+        }
+        .nav-btn:not(.active):hover {
+            background-color: #D7CCC8; /* Light Muted Brown */
+        }
+        .table-header {
+            background-color: #EFEBE9; /* Very Light Brown */
+        }
+        .status-ok {
+            background-color: #C8E6C9; /* Green */
+            color: #2E7D32;
+        }
+        .status-low {
+            background-color: #FFECB3; /* Amber */
+            color: #FF6F00;
+        }
+        .status-out {
+            background-color: #FFCDD2; /* Red */
+            color: #C62828;
+        }
+        .status-pending {
+            background-color: #D1C4E9; /* Light Purple */
+            color: #4527A0;
+        }
+        .status-completed {
+            background-color: #C8E6C9; /* Green */
+            color: #2E7D32;
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+
+    <div class="max-w-7xl mx-auto">
+        <!-- Header -->
+        <header class="mb-8">
+            <h1 class="text-3xl md:text-4xl font-bold text-[#795548]">Makerspace Inventory Dashboard</h1>
+            <p class="text-lg text-gray-600">Real-time overview of materials and machine maintenance.</p>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="flex flex-wrap gap-2 mb-8">
+            <button id="nav-overview" class="nav-btn active px-4 py-2 rounded-md text-sm font-medium">Overview</button>
+            <button id="nav-inventory" class="nav-btn px-4 py-2 rounded-md text-sm font-medium">Inventory Details</button>
+            <button id="nav-purchases" class="nav-btn px-4 py-2 rounded-md text-sm font-medium">Material Purchases</button>
+            <button id="nav-maintenance" class="nav-btn px-4 py-2 rounded-md text-sm font-medium">Maintenance Log</button>
+            <button id="nav-requests" class="nav-btn px-4 py-2 rounded-md text-sm font-medium">Print Requests</button>
+            <button id="nav-classes" class="nav-btn px-4 py-2 rounded-md text-sm font-medium">Class Usage</button>
+            <!-- NEW PDF EXPORT BUTTON -->
+            <button id="export-pdf-btn" class="bg-gray-700 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-gray-900 transition-colors ml-4">Export Overview to PDF</button>
+        </nav>
+        
+        <!-- Loading Indicator -->
+        <div id="loading-indicator" class="text-center py-8 text-gray-500 font-semibold text-lg hidden">
+            <p>Loading data from cloud... Please wait.</p>
+        </div>
+
+        <!-- Main Content -->
+        <main id="main-content" class="hidden">
+            <!-- Overview Section (Target for PDF Export) -->
+            <section id="view-overview">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                    <div class="bg-white p-6 rounded-lg shadow-md flex flex-col justify-between">
+                        <h3 class="text-gray-500 font-semibold">Total Inventory Value</h3>
+                        <p id="total-value" class="text-3xl font-bold text-[#795548] mt-2">$0.00</p>
+                    </div>
+                    <div class="bg-white p-6 rounded-lg shadow-md flex flex-col justify-between">
+                        <h3 class="text-gray-500 font-semibold">Items Low on Stock</h3>
+                        <p id="low-stock-count" class="text-3xl font-bold text-amber-600 mt-2">0</p>
+                    </div>
+                     <div class="bg-white p-6 rounded-lg shadow-md flex flex-col justify-between">
+                        <h3 class="text-gray-500 font-semibold">Items Out of Stock</h3>
+                        <p id="out-of-stock-count" class="text-3xl font-bold text-red-600 mt-2">0</p>
+                    </div>
+                    <div class="bg-white p-6 rounded-lg shadow-md flex flex-col justify-between">
+                        <h3 class="text-gray-500 font-semibold">Total Machines Tracked</h3>
+                        <p id="machine-count" class="text-3xl font-bold text-[#795548] mt-2">6</p>
+                    </div>
+                </div>
+
+                <!-- MACHINE RATE CONFIGURATION (NEW SECTION) -->
+                <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                    <h3 class="text-xl font-semibold mb-4 text-center text-[#795548]">Machine Operational Rate Configuration</h3>
+                    <p class="text-center text-gray-600 text-sm mb-4">Set the **Hourly Overhead Rate (OOR)** for each machine category. This fee covers maintenance, electricity, and general operating costs.</p>
+                    <div id="rate-configuration-container" class="grid grid-cols-2 md:grid-cols-3 gap-6 max-w-4xl mx-auto">
+                        <!-- Rates populated by JS -->
+                    </div>
+                </div>
+
+
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <div class="bg-white p-6 rounded-lg shadow-md">
+                        <h3 class="text-xl font-semibold mb-4 text-center">Inventory Value by Category</h3>
+                        <p class="text-center text-gray-600 text-sm mb-4">This chart shows the total cost of consumable materials currently in stock for each major equipment category. It helps identify where the most value is tied up in inventory.</p>
+                        <div class="chart-container">
+                            <canvas id="valueByCategoryChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="bg-white p-6 rounded-lg shadow-md">
+                        <h3 class="text-xl font-semibold mb-4 text-center">Stock Status Breakdown</h3>
+                         <p class="text-center text-gray-600 text-sm mb-4">This chart provides a quick overview of the inventory's health, categorizing items by their stock levels relative to their reorder points. Use this to anticipate purchasing needs.</p>
+                        <div class="chart-container">
+                            <canvas id="stockStatusChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- New Monthly Cost Breakdown Chart -->
+                <div class="grid grid-cols-1 gap-8 mt-8">
+                    <div class="bg-white p-6 rounded-lg shadow-md lg:col-span-1">
+                        <h3 class="text-xl font-semibold mb-4 text-center">Monthly Operational Cost Breakdown</h3>
+                        <p class="text-center text-gray-600 text-sm mb-4">Tracking combined monthly spending on consumable materials (purchases) and maintenance/repair costs.</p>
+                        
+                        <!-- DATE RANGE FILTER (NEW) -->
+                        <div class="flex flex-wrap items-center justify-center gap-4 mb-4 bg-gray-50 p-3 rounded-md border">
+                            <label for="cost-start-date" class="font-medium text-sm text-gray-700">Start Date:</label>
+                            <input type="date" id="cost-start-date" class="p-2 border rounded-md bg-white w-36">
+                            
+                            <label for="cost-end-date" class="font-medium text-sm text-gray-700">End Date:</label>
+                            <input type="date" id="cost-end-date" class="p-2 border rounded-md bg-white w-36">
+
+                            <button id="apply-cost-filter-btn" class="bg-[#A1887F] text-white px-4 py-2 rounded-md text-sm hover:bg-[#795548] transition-colors">Apply Filter</button>
+                        </div>
+                        
+                        <div class="chart-container" style="max-width: 100%; height: 350px;">
+                            <canvas id="monthlyCostChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Inventory Details Section -->
+            <section id="view-inventory" class="hidden">
+                 <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h3 class="text-xl font-semibold mb-4">Add New Item to Inventory</h3>
+                    <p class="text-gray-600 text-sm mb-4">Use this form to add new materials or spare parts under a specific machine. The item name list changes based on the machine selected.</p>
+                    <div id="add-item-form" class="grid grid-cols-1 md:grid-cols-7 gap-3 p-4 border border-dashed rounded-md mb-8">
+                        <select id="item-machine" class="p-2 border rounded-md bg-gray-50 md:col-span-1">
+                            <!-- Options populated by JS -->
+                        </select>
+                        <select id="item-name-select" class="p-2 border rounded-md bg-gray-50 md:col-span-1 hidden">
+                            <!-- Options populated by JS if 3D printer selected -->
+                        </select>
+                        <input type="text" id="item-name-input" placeholder="Item Name (e.g., Cleaning Kit)" class="p-2 border rounded-md md:col-span-1">
+                        
+                        <select id="item-color" class="p-2 border rounded-md bg-gray-50 md:col-span-1">
+                             <option value="" disabled selected>Select Color</option>
+                            <!-- Options populated by JS -->
+                        </select>
+                        <input type="number" id="item-quantity" placeholder="Qty" min="0" class="p-2 border rounded-md text-right md:col-span-1">
+                        <input type="number" step="0.01" id="item-cost" placeholder="Unit Cost ($)" min="0" class="p-2 border rounded-md text-right md:col-span-1">
+                        <button id="add-item-btn" class="bg-[#A1887F] text-white py-2 rounded-md hover:bg-[#795548] transition-colors md:col-span-1">
+                            Add Item
+                        </button>
+                    </div>
+
+                    <h3 class="text-xl font-semibold mb-4">Detailed Inventory List</h3>
+                    <p class="text-gray-600 text-sm mb-4">Use the filters below to browse all inventoried items. The inventory is organized by machine category for easy stock checks. **Click on a Quantity or Unit Cost value, or use the Color dropdown, to edit stock data. Use the 'Delete' button to remove an item.**</p>
+                    <div class="flex flex-wrap gap-4 mb-8">
+                        <select id="machine-filter" class="p-2 border rounded-md bg-gray-50">
+                            <option value="all">All Machines</option>
+                            <!-- Options will be populated by JS -->
+                        </select>
+                        <select id="status-filter" class="p-2 border rounded-md bg-gray-50">
+                            <option value="all">All Statuses</option>
+                            <option value="OK">OK</option>
+                            <option value="Low Stock">Low Stock</option>
+                            <option value="Out of Stock">Out of Stock</option>
+                        </select>
+                        <select id="color-filter" class="p-2 border rounded-md bg-gray-50">
+                            <option value="all">All Colors</option>
+                            <!-- Options will be populated by JS -->
+                        </select>
+                    </div>
+                    <!-- New container for dynamic tables -->
+                    <div id="inventory-details-container" class="space-y-8">
+                        <!-- Dynamic tables will be generated here by JS -->
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Material Purchases Section (NEW) -->
+            <section id="view-purchases" class="hidden">
+                <!-- NEW QUICK REORDER LINKS SECTION -->
+                <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                    <h3 class="text-xl font-semibold mb-4">Quick Reorder Links by Machine</h3>
+                    <p class="text-gray-600 text-sm mb-4">Direct links to the primary online store or supplier for each machine's consumables and maintenance parts.</p>
+                    <div id="machine-store-links" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <!-- Links populated by JS -->
+                    </div>
+                </div>
+                
+                <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                    <h3 class="text-xl font-semibold mb-4">Log New Material Purchase</h3>
+                    <p class="text-gray-600 text-sm mb-4">Record the date and total cost of any new material purchase. This total cost is used for the "Material Usage Cost" in the Overview charts.</p>
+                    <div id="add-purchase-form" class="grid grid-cols-1 md:grid-cols-5 gap-3 p-4 border border-dashed rounded-md">
+                        <input type="date" id="purchase-date" class="p-2 border rounded-md bg-gray-50 md:col-span-1" value="">
+                        <input type="text" id="purchase-item" placeholder="Item Name (e.g., PLA spool, Ink Cartridge)" class="p-2 border rounded-md md:col-span-1">
+                        <select id="purchase-machine" class="p-2 border rounded-md bg-gray-50 md:col-span-1">
+                            <!-- Options populated by JS -->
+                        </select>
+                        <input type="number" step="0.01" id="purchase-cost" placeholder="Total Cost ($)" class="p-2 border rounded-md md:col-span-1 text-right">
+                        <button id="add-purchase-btn" class="bg-[#A1887F] text-white py-2 rounded-md hover:bg-[#795548] transition-colors md:col-span-1">
+                            Add Purchase
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h3 class="text-xl font-semibold mb-4">Material Purchases History</h3>
+                    <p class="text-gray-600 text-sm mb-4">Review all recorded material expenditures. You can delete incorrect entries below.</p>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="table-header">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Machine Category</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Item Purchased</th>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Total Cost</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="purchases-table-body" class="bg-white divide-y divide-gray-200">
+                                <!-- Rows will be populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Maintenance Log Section -->
+            <section id="view-maintenance" class="hidden">
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h3 class="text-xl font-semibold mb-4">Add New Maintenance Log Entry</h3>
+                    <p class="text-gray-600 text-sm mb-4">Use this form to add a new repair or service record. **All costs are added to the machine's lifecycle spending.**</p>
+                    <div id="add-log-form" class="grid grid-cols-1 md:grid-cols-7 gap-3 p-4 border border-dashed rounded-md mb-6">
+                        <select id="log-machine" class="p-2 border rounded-md bg-gray-50 md:col-span-1">
+                            <!-- Options will be populated by JS -->
+                        </select>
+                        <input type="date" id="log-date" class="p-2 border rounded-md bg-gray-50 md:col-span-1" value="">
+                        <input type="text" id="log-type" placeholder="Type (e.g., Repair, Cleaning)" class="p-2 border rounded-md md:col-span-1">
+                        <input type="text" id="log-worker" placeholder="Worker Name" class="p-2 border rounded-md bg-gray-50 md:col-span-1">
+                        <input type="number" step="0.01" id="log-cost" placeholder="Cost ($)" class="p-2 border rounded-md md:col-span-1 text-right">
+                        <input type="text" id="log-details" placeholder="Details/Link" class="p-2 border rounded-md md:col-span-1">
+                        <button id="add-log-btn" class="bg-[#795548] text-white py-2 rounded-md hover:bg-[#5D4037] transition-colors md:col-span-1">
+                            Add Log
+                        </button>
+                    </div>
+
+                    <h3 class="text-xl font-semibold mb-4">Machine Maintenance & Spending History</h3>
+                    <p class="text-gray-600 text-sm mb-4">You can edit the details and costs of past logs directly in the table below. The table is sorted by date (most recent first).</p>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="table-header">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Machine</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Worker</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cost</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Details</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="maintenance-table-body" class="bg-white divide-y divide-gray-200">
+                                <!-- Rows will be populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Print Request Section -->
+            <section id="view-requests" class="hidden">
+                <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                    <h3 class="text-xl font-semibold mb-4">Submit New Roland Print Request</h3>
+                    <p class="text-gray-600 text-sm mb-4">Enter the specifications for the print job, including dimensions, media type, and whether it is a sticker or a batch run.</p>
+                    <div id="add-request-form" class="grid grid-cols-1 md:grid-cols-6 gap-3 p-4 border border-dashed rounded-md">
+                        <input type="text" id="req-name" placeholder="Requested By" class="p-2 border rounded-md md:col-span-1">
+                        <input type="text" id="req-size" placeholder="Size (e.g., 24x36 inches)" class="p-2 border rounded-md md:col-span-1">
+                        <select id="req-media" class="p-2 border rounded-md bg-gray-50 md:col-span-1">
+                            <option value="" disabled selected>Select Media Type</option>
+                            <!-- Options populated by JS -->
+                        </select>
+                        <select id="req-type" class="p-2 border rounded-md bg-gray-50 md:col-span-1">
+                            <option value="Sticker">Sticker</option>
+                            <option value="Batch">Batch Run</option>
+                            <option value="Standard Print">Standard Print</option>
+                        </select>
+                        <input type="number" id="req-quantity" placeholder="Quantity/Batch Size" min="1" class="p-2 border rounded-md md:col-span-1">
+                        <button id="add-request-btn" class="bg-[#A1887F] text-white py-2 rounded-md hover:bg-[#795548] transition-colors md:col-span-1">
+                            Submit Request
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h3 class="text-xl font-semibold mb-4">Active Roland Print Request Log</h3>
+                    <p class="text-gray-600 text-sm mb-4">View and manage pending print requests. Use the "Mark Completed" button to update the status once the job is finished.</p>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="table-header">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Requested By</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Media</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Specs</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="requests-table-body" class="bg-white divide-y divide-gray-200">
+                                <!-- Rows will be populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Class Usage Section -->
+            <section id="view-classes" class="hidden">
+                 <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                    <h3 class="text-xl font-semibold mb-4">Monthly Usage and Cost Correlation</h3>
+                    <p class="text-center text-gray-600 text-sm mb-4">This chart correlates the total number of classes taught per month (Line) with the total operational cost (Bars) for the last 6 months, helping to identify usage trends versus expenses.</p>
+                    <div class="chart-container" style="max-width: 100%; height: 350px;">
+                        <canvas id="classCostCorrelationChart"></canvas>
+                    </div>
+                </div>
+                
+                 <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                    <h3 class="text-xl font-semibold mb-4">Log New Class</h3>
+                    <p class="text-gray-600 text-sm mb-4">Record new scheduled classes to accurately track machine usage over time.</p>
+                    <div id="add-class-form" class="grid grid-cols-1 md:grid-cols-6 gap-3 p-4 border border-dashed rounded-md">
+                        <input type="date" id="class-date" class="p-2 border rounded-md bg-gray-50 md:col-span-1" value="">
+                        <select id="class-machine" class="p-2 border rounded-md bg-gray-50 md:col-span-1">
+                            <!-- Options populated by JS -->
+                        </select>
+                        <input type="text" id="class-topic" placeholder="Class Topic (e.g., FDM Basics)" class="p-2 border rounded-md md:col-span-1">
+                        <input type="number" id="class-duration" placeholder="Duration (Hours)" min="0.5" step="0.5" class="p-2 border rounded-md md:col-span-1">
+                        <input type="number" id="class-attendees" placeholder="Attendees" min="1" class="p-2 border rounded-md md:col-span-1">
+                        <button id="add-class-btn" class="bg-[#795548] text-white py-2 rounded-md hover:bg-[#5D4037] transition-colors md:col-span-1">
+                            Add Class
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h3 class="text-xl font-semibold mb-4">Class Schedule Log</h3>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="table-header">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Machine</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Topic</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration (Hrs)</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Attendees</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="class-table-body" class="bg-white divide-y divide-gray-200">
+                                <!-- Rows will be populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        // --- INITIAL HARDCODED DATA DEFINITIONS (USED AS FALLBACK) ---
+        const initialInventoryData = [
+            // Ultimaker (Filament colors added/expanded)
+            { id: 1, machine: 'Ultimaker', name: 'PLA', color: 'Red', quantity: 15, unitCost: 25.00, reorderPoint: 5, reorderLink: 'https://example.com/pla-red' },
+            { id: 2, machine: 'Ultimaker', name: 'Tough PLA', color: 'Blue', quantity: 10, unitCost: 35.00, reorderPoint: 5, reorderLink: 'https://example.com/tough-pla' },
+            { id: 3, machine: 'Ultimaker', name: 'Nylon', color: 'Black', quantity: 2, unitCost: 55.00, reorderPoint: 2, reorderLink: 'https://example.com/nylon' },
+            { id: 4, machine: 'Ultimaker', name: 'PVA', color: 'Clear', quantity: 0, unitCost: 50.00, reorderPoint: 1, reorderLink: 'https://example.com/pva' },
+            { id: 5, machine: 'Ultimaker', name: '0.4mm Nozzles', color: 'N/A', quantity: 8, unitCost: 15.00, reorderPoint: 4, reorderLink: 'https://example.com/nozzles' },
+            // Raise3D (Filament colors added/expanded)
+            { id: 6, machine: 'Raise3D', name: 'PLA', color: 'Green', quantity: 20, unitCost: 22.00, reorderPoint: 10, reorderLink: 'https://example.com/pla175-green' },
+            { id: 7, machine: 'Raise3D', name: 'TPU', color: 'Blue', quantity: 4, unitCost: 45.00, reorderPoint: 5, reorderLink: 'https://example.com/tpu-blue' },
+            { id: 8, machine: 'Raise3D', name: 'PET CF', color: 'Black', quantity: 6, unitCost: 70.00, reorderPoint: 5, reorderLink: 'https://example.com/petcf-black' },
+            // Stratasys (Using new material names)
+            { id: 9, machine: 'Stratasys', name: 'ABS-M30', color: 'White', quantity: 3, unitCost: 250.00, reorderPoint: 2, reorderLink: 'https://example.com/absm30' },
+            { id: 10, machine: 'Stratasys', name: 'SR-30 Support', color: 'Clear', quantity: 1, unitCost: 300.00, reorderPoint: 2, reorderLink: 'https://example.com/sr30' },
+            // Roland Printer 
+            { id: 11, machine: 'Roland Printer', name: 'Glossy Paper Roll', color: 'White', quantity: 3, unitCost: 80.00, reorderPoint: 2, reorderLink: 'https://example.com/glossy' },
+            { id: 12, machine: 'Roland Printer', name: 'Matte Adhesive Roll', color: 'White', quantity: 1, unitCost: 95.00, reorderPoint: 2, reorderLink: 'https://example.com/matte' },
+            { id: 13, machine: 'Roland Printer', name: 'Glossy Adhesive Roll', color: 'White', quantity: 4, unitCost: 105.00, reorderPoint: 2, reorderLink: 'https://example.com/glossy-adh' },
+            { id: 14, machine: 'Roland Printer', name: 'Matte Paper Roll', color: 'White', quantity: 2, unitCost: 85.00, reorderPoint: 2, reorderLink: 'https://example.com/matte-paper' },
+            { id: 15, machine: 'Roland Printer', name: 'Cyan Ink Cartridge', color: 'Cyan', quantity: 2, unitCost: 60.00, reorderPoint: 1, reorderLink: 'https://example.com/cyan' },
+            { id: 16, machine: 'Roland Printer', name: 'Magenta Ink Cartridge', color: 'Magenta', quantity: 2, unitCost: 60.00, reorderPoint: 1, reorderLink: 'https://example.com/magenta-ink' },
+            { id: 17, machine: 'Roland Printer', name: 'Black Ink Cartridge', color: 'Black', quantity: 3, unitCost: 60.00, reorderPoint: 1, reorderLink: 'https://example.com/black-ink' },
+            { id: 18, machine: 'Roland Printer', name: 'Yellow Ink Cartridge', color: 'Yellow', quantity: 2, unitCost: 60.00, reorderPoint: 1, reorderLink: 'https://example.com/yellow-ink' },
+            { id: 19, machine: 'Roland Printer', name: 'Cleaning Solution', color: 'N/A', quantity: 1, unitCost: 40.00, reorderPoint: 1, reorderLink: 'https://example.com/cleaner' },
+            // Vacuum Former (Structured Materials by Color)
+            { id: 20, machine: 'Vacuum Former', name: 'ABS Sheet', color: 'Blue', quantity: 10, unitCost: 5.00, reorderPoint: 20, reorderLink: 'https://example.com/abs-blue' },
+            { id: 21, machine: 'Vacuum Former', name: 'PETG Sheet', color: 'Yellow', quantity: 15, unitCost: 7.00, reorderPoint: 20, reorderLink: 'https://example.com/petg-yellow' },
+            { id: 22, machine: 'Vacuum Former', name: 'HIPS Sheet', color: 'Black', quantity: 20, unitCost: 6.00, reorderPoint: 20, reorderLink: 'https://example.com/hips-black' },
+            { id: 23, machine: 'Vacuum Former', name: 'ABS Sheet', color: 'Brown', quantity: 5, unitCost: 5.00, reorderPoint: 20, reorderLink: 'https://example.com/abs-brown' },
+            // ULS Laser
+            { id: 24, machine: 'ULS Laser', name: 'Maintenance Kit', color: 'N/A', quantity: 1, unitCost: 150.00, reorderPoint: 1, reorderLink: 'https://example.com/uls-kit' },
+            // Generic Filament / Open Box
+            { id: 25, machine: 'Generic', name: 'PLA Filament (Open Box)', color: 'Pink', quantity: 3, unitCost: 10.00, reorderPoint: 1, reorderLink: 'https://example.com/generic-pla-pink' },
+            { id: 26, machine: 'Generic', name: 'ABS Scraps / Remnants', color: 'Assorted', quantity: 10, unitCost: 5.00, reorderPoint: 5, reorderLink: 'https://example.com/generic-abs-scrap' },
+        ];
+
+        const initialMaintenanceData = [
+            { id: 1, machine: 'Ultimaker', date: '2025-04-15', type: 'Repair', details: 'Replaced clogged hotend assembly.', cost: 120.00, worker: 'Jane Doe' },
+            { id: 2, machine: 'Roland Printer', date: '2025-05-22', type: 'Scheduled Maintenance', details: 'Cleaned print heads and replaced cap top.', cost: 75.00, worker: 'John Smith' },
+            { id: 3, machine: 'Stratasys', date: '2025-06-05', type: 'Calibration', details: 'Performed annual tip calibration.', cost: 0.00, worker: 'Jane Doe' },
+            { id: 4, machine: 'Raise3D', date: '2025-07-20', type: 'Repair', details: 'Replaced worn belts.', cost: 45.00, worker: 'John Smith' },
+            { id: 5, machine: 'Ultimaker', date: '2025-08-10', type: 'Scheduled Maintenance', details: 'Fan replaced.', cost: 50.00, worker: 'Jane Doe' },
+            { id: 6, machine: 'ULS Laser', date: '2025-09-01', type: 'Repair', details: 'Mirror alignment.', cost: 100.00, worker: 'John Smith' },
+            { id: 7, machine: 'Vacuum Former', date: '2025-10-05', type: 'Repair', details: 'Heater element replaced.', cost: 80.00, worker: 'Jane Doe' },
+        ];
+        
+        // NEW: Material Purchases Data 
+        const initialPurchasesData = [
+            { id: 1, date: '2025-04-10', item: 'Bulk PLA Order', machine: 'Generic', cost: 450.00 },
+            { id: 2, date: '2025-05-05', item: 'Nylon/PC Stock', machine: 'Ultimaker', cost: 350.50 },
+            { id: 3, date: '2025-06-01', item: 'Roland Ink Bulk', machine: 'Roland Printer', cost: 550.00 },
+            { id: 4, date: '2025-07-15', item: 'Vacuum Forming Sheets', machine: 'Vacuum Former', cost: 710.25 },
+            { id: 5, date: '2025-08-01', item: 'General Filament Restock', machine: 'Generic', cost: 590.00 },
+            { id: 6, date: '2025-09-01', item: 'Stratasys Materials', machine: 'Stratasys', cost: 780.00 },
+            { id: 7, date: '2025-10-01', item: 'More Ink', machine: 'Roland Printer', cost: 300.00 },
+        ];
+        
+        const initialRolandRequests = [
+            { id: 1, date: '2025-09-29', requestedBy: 'Alice', media: 'Glossy Adhesive Roll', specs: '12x12 inches, Sticker, Qty 50', status: 'Pending' },
+            { id: 2, date: '2025-09-28', requestedBy: 'Bob', media: 'Matte Paper Roll', specs: '24x36 inches, Standard Print, Qty 1', status: 'Completed' },
+        ];
+        
+        const initialClassScheduleData = [
+            { id: 1, date: '2025-04-10', machine: 'Ultimaker', topic: 'Intro to FDM Printing', durationHours: 2, attendees: 10 },
+            { id: 2, date: '2025-04-17', machine: 'Roland Printer', topic: 'Vinyl Cutter Basics', durationHours: 1.5, attendees: 8 },
+            { id: 3, date: '2025-05-05', machine: 'ULS Laser', topic: 'Laser Etching Fundamentals', durationHours: 3, attendees: 12 },
+            { id: 4, date: '2025-06-12', machine: 'Ultimaker', topic: 'Nylon Composites', durationHours: 2, attendees: 6 },
+            { id: 5, date: '2025-07-20', machine: 'Vacuum Former', topic: 'Intro to Thermoforming', durationHours: 1, attendees: 15 },
+            { id: 6, date: '2025-08-01', machine: 'Raise3D', topic: 'TPU & Flexible Prints', durationHours: 1.5, attendees: 9 },
+            { id: 7, date: '2025-09-10', machine: 'Stratasys', topic: 'Advanced ABS Printing', durationHours: 3, attendees: 5 },
+            { id: 8, date: '2025-09-18', machine: 'ULS Laser', topic: 'Wood Engraving', durationHours: 2, attendees: 11 },
+            { id: 9, date: '2025-09-25', machine: 'Ultimaker', topic: 'Support Removal Techniques', durationHours: 1, attendees: 10 },
+            { id: 10, date: '2025-10-01', machine: 'ULS Laser', topic: 'Advanced Engraving', durationHours: 2.5, attendees: 10 },
+        ];
+        
+        // NEW: Initial Machine Rates (as fallback)
+        const initialMachineRates = {
+            'Ultimaker': 3.50, // Example: $3.50/hr
+            'Raise3D': 4.50,
+            'Stratasys': 8.00,
+            'Roland Printer': 5.00,
+            'Vacuum Former': 2.00,
+            'ULS Laser': 7.00,
+            'Generic': 0.00,
+        };
+
+        // --- MUTABLE DATA ARRAYS ---
+        var inventoryData = [];
+        var maintenanceData = [];
+        var purchasesData = []; 
+        var rolandRequests = [];
+        var classScheduleData = [];
+        var machineRates = {}; // NEW: Stores editable rates
+        
+        var nextMaintenanceId = 1;
+        var nextRequestId = 1;
+        var nextInventoryId = 0;
+        var nextClassId = 1;
+        var nextPurchaseId = 1; 
+        
+        var printerMaterialList = [
+            'PLA', 'Tough PLA', 'Nylon', 'TPU', 'PC', 'PET CF', 'Nylon CF', 'PVA', 'Breakaway', 'ABS-M30', 'SR-30 Support'
+        ];
+        
+        var commonColors = ['Red', 'Orange', 'Yellow', 'Green', 'Blue', 'Brown', 'Black', 'Clear', 'White', 'Pink', 'Magenta', 'Cyan', 'Assorted', 'N/A'];
+        var machineCategories = [];
+        var rolandMediaTypes = [];
+        var printerMachines = ['Ultimaker', 'Raise3D', 'Stratasys'];
+        
+        // NEW: Quick Reorder Links by Machine
+        var machineStoreLinks = {
+            'Ultimaker': 'https://www.ultimaker.com/store',
+            'Raise3D': 'https://www.raise3d.com/shop',
+            'Stratasys': 'https://www.stratasys.com/materials',
+            'Roland Printer': 'https://www.rolanddga.com/supplies',
+            'Vacuum Former': 'https://www.plasticsupplier.com/vacuum-form-sheets',
+            'ULS Laser': 'https://www.ulsinc.com/parts-supplies',
+            'Generic': 'https://www.amazon.com/industrial-supplies',
+        };
+
+
+        // --- FIREBASE GLOBALS ---
+        var app, db, auth, currentUserId;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-makerspace-app';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- PERSISTENCE FUNCTIONS (UPDATED FOR FIRESTORE) ---
+
+        function updateFirestoreData() {
+            if (!db || !currentUserId) {
+                console.error("Firestore not initialized or user not authenticated.");
+                return;
+            }
+            
+            // Collect all data into a single object for the document
+            const dataToSave = {
+                inventory: inventoryData,
+                maintenance: maintenanceData,
+                purchases: purchasesData, 
+                requests: rolandRequests,
+                classes: classScheduleData,
+                machineRates: machineRates, // NEW: Save machine rates
+                ids: {
+                    nextMaintenanceId,
+                    nextRequestId,
+                    nextClassId,
+                    nextInventoryId,
+                    nextPurchaseId 
+                }
+            };
+            
+            const docRef = firebase.doc(db, 'artifacts', appId, 'users', currentUserId, 'data', 'makerspace_data');
+            
+            firebase.setDoc(docRef, dataToSave).catch(error => {
+                console.error("Error writing document: ", error);
+            });
+        }
+        
+        function initializeFirebase() {
+            if (!firebaseConfig) {
+                console.error("Firebase config not available. Using local data only.");
+                useInitialData();
+                return;
+            }
+            
+            firebase.setLogLevel('Debug');
+            app = firebase.initializeApp(firebaseConfig);
+            db = firebase.getFirestore(app);
+            auth = firebase.getAuth(app);
+
+            const signInPromise = initialAuthToken 
+                ? firebase.signInWithCustomToken(auth, initialAuthToken)
+                : firebase.signInAnonymously(auth);
+
+            signInPromise
+                .then(userCredential => {
+                    currentUserId = userCredential.user.uid;
+                    startRealtimeListener();
+                })
+                .catch(error => {
+                    console.error("Authentication failed. Falling back to initial data.", error);
+                    useInitialData();
+                });
+        }
+
+        function useInitialData() {
+            inventoryData = initialInventoryData.map(item => ({ ...item }));
+            maintenanceData = initialMaintenanceData.map(item => ({ ...item }));
+            purchasesData = initialPurchasesData.map(item => ({ ...item })); 
+            rolandRequests = initialRolandRequests.map(item => ({ ...item }));
+            classScheduleData = initialClassScheduleData.map(item => ({ ...item }));
+            machineRates = {...initialMachineRates}; // NEW: Load initial rates
+            recalculateInventory();
+            initializeAppUI();
+        }
+
+        function startRealtimeListener() {
+            const docRef = firebase.doc(db, 'artifacts', appId, 'users', currentUserId, 'data', 'makerspace_data');
+            
+            firebase.onSnapshot(docRef, (doc) => {
+                if (doc.exists()) {
+                    const savedData = doc.data();
+                    
+                    inventoryData = savedData.inventory || initialInventoryData.map(item => ({ ...item }));
+                    maintenanceData = savedData.maintenance || initialMaintenanceData.map(item => ({ ...item }));
+                    purchasesData = savedData.purchases || initialPurchasesData.map(item => ({ ...item })); 
+                    rolandRequests = savedData.requests || initialRolandRequests.map(item => ({ ...item }));
+                    classScheduleData = savedData.classes || initialClassScheduleData.map(item => ({ ...item }));
+                    machineRates = savedData.machineRates || {...initialMachineRates}; // NEW: Load rates
+                    
+                    const ids = savedData.ids || {};
+                    nextMaintenanceId = ids.nextMaintenanceId || (maintenanceData.length > 0 ? Math.max(...maintenanceData.map(log => log.id)) + 1 : 1);
+                    nextRequestId = ids.nextRequestId || (rolandRequests.length > 0 ? Math.max(...rolandRequests.map(req => req.id)) + 1 : 1);
+                    nextClassId = ids.nextClassId || (classScheduleData.length > 0 ? Math.max(...classScheduleData.map(c => c.id)) + 1 : 1);
+                    nextInventoryId = ids.nextInventoryId || (inventoryData.length > 0 ? Math.max(...inventoryData.map(item => item.id)) + 1 : 1);
+                    nextPurchaseId = ids.nextPurchaseId || (purchasesData.length > 0 ? Math.max(...purchasesData.map(p => p.id)) + 1 : 1); 
+
+                } else {
+                    // Document doesn't exist, set initial data
+                    useInitialData();
+                    updateFirestoreData(); // Write initial data to cloud
+                }
+                recalculateInventory();
+                initializeAppUI();
+            }, (error) => {
+                console.error("Error listening to document:", error);
+                useInitialData();
+            });
+        }
+
+        // --- PDF EXPORT FUNCTION ---
+        function exportOverviewToPdf() {
+            const overviewElement = document.getElementById('view-overview');
+            const button = document.getElementById('export-pdf-btn');
+            
+            // Temporarily disable button and show loading state
+            button.disabled = true;
+            button.textContent = 'Generating PDF...';
+
+            // Ensure the overview section is visible before rendering
+            if (currentView !== 'overview') {
+                changeView('overview');
+            }
+
+            // Use window.jspdf and window.html2canvas from CDN imports
+            const { jsPDF } = window.jspdf;
+
+            window.html2canvas(overviewElement, {
+                scale: 2, // Increase scale for better resolution
+                useCORS: true, 
+                scrollX: 0,
+                scrollY: -window.scrollY,
+                windowWidth: document.documentElement.offsetWidth,
+                windowHeight: document.documentElement.offsetHeight,
+            }).then(canvas => {
+                const imgData = canvas.toDataURL('image/png');
+                const imgWidth = 210; // A4 width in mm
+                const pageHeight = 297; // A4 height in mm
+                const imgHeight = canvas.height * imgWidth / canvas.width;
+                let heightLeft = imgHeight;
+
+                const pdf = new jsPDF('p', 'mm', 'a4');
+                let position = 0;
+
+                pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+                heightLeft -= pageHeight;
+
+                while (heightLeft >= 0) {
+                    position = heightLeft - imgHeight;
+                    pdf.addPage();
+                    pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+                    heightLeft -= pageHeight;
+                }
+                
+                pdf.save(`Makerspace_Dashboard_Overview_${new Date().toISOString().slice(0, 10)}.pdf`);
+                
+                // Restore button state
+                button.disabled = false;
+                button.textContent = 'Export Overview to PDF';
+            }).catch(error => {
+                console.error("PDF generation failed:", error);
+                alert("Error generating PDF. Please ensure the Overview tab is fully loaded.");
+                button.disabled = false;
+                button.textContent = 'Export Overview to PDF';
+            });
+        }
+
+
+        // --- UTILITY FUNCTIONS ---
+        function getUniqueColors() {
+            var allColors = inventoryData.map(item => item.color).filter(c => c && c.trim() !== '');
+            var uniqueColors = [...new Set(allColors)].sort();
+            if (uniqueColors.includes('N/A') === false) uniqueColors.unshift('N/A');
+            if (uniqueColors.includes('Assorted') === false) uniqueColors.unshift('Assorted');
+            return uniqueColors;
+        }
+
+        function getMachineCategories() {
+             var categories = [...new Set(inventoryData.map(item => item.machine))];
+             categories.sort(); 
+             return categories;
+        }
+
+        function getRolandMediaTypes() {
+             return inventoryData
+                .filter(item => item.machine === 'Roland Printer' && item.name.includes('Roll'))
+                .map(item => item.name);
+        }
+
+        function getMonthKey(dateString) {
+            var date = new Date(dateString);
+            var utcDate = new Date(date.getTime() + date.getTimezoneOffset() * 60000);
+            return `${utcDate.getFullYear()}-${String(utcDate.getMonth() + 1).padStart(2, '0')}`;
+        }
+
+        function getMonthLabel(monthKey) {
+            var [year, month] = monthKey.split('-');
+            var date = new Date(year, parseInt(month) - 1, 1);
+            return date.toLocaleString('en-US', { month: 'short', year: 'numeric' });
+        }
+
+
+        // --- STATE MANAGEMENT ---
+        var currentView = 'overview';
+        var views = {
+            overview: document.getElementById('view-overview'),
+            inventory: document.getElementById('view-inventory'),
+            purchases: document.getElementById('view-purchases'), // NEW
+            maintenance: document.getElementById('view-maintenance'),
+            requests: document.getElementById('view-requests'),
+            classes: document.getElementById('view-classes'),
+        };
+        var navButtons = {
+            overview: document.getElementById('nav-overview'),
+            inventory: document.getElementById('nav-inventory'),
+            purchases: document.getElementById('nav-purchases'), // NEW
+            maintenance: document.getElementById('nav-maintenance'),
+            requests: document.getElementById('nav-requests'),
+            classes: document.getElementById('nav-classes'),
+        };
+
+        function changeView(viewName) {
+            currentView = viewName;
+            Object.entries(views).forEach(([name, view]) => {
+                view.classList.toggle('hidden', name !== viewName);
+            });
+            Object.entries(navButtons).forEach(([name, button]) => {
+                button.classList.toggle('active', name === viewName);
+            });
+            
+            if (viewName === 'classes') {
+                renderClassCostCorrelationChart();
+                renderClassLogTable();
+            }
+        }
+        
+        function recalculateInventory() {
+            inventoryData.forEach(item => {
+                item.totalValue = item.quantity * item.unitCost;
+                if (item.quantity === 0) {
+                    item.status = 'Out of Stock';
+                } else if (item.quantity <= item.reorderPoint) {
+                    item.status = 'Low Stock';
+                } else {
+                    item.status = 'OK';
+                }
+            });
+        }
+
+        // --- DATA PROCESSING AND RENDERING (OVERVIEW) ---
+        
+        function renderOverview() {
+            var totalValue = inventoryData.reduce((sum, item) => sum + item.totalValue, 0);
+            var lowStockCount = inventoryData.filter(item => item.status === 'Low Stock').length;
+            var outOfStockCount = inventoryData.filter(item => item.status === 'Out of Stock').length;
+
+            document.getElementById('total-value').textContent = `$${totalValue.toFixed(2)}`;
+            document.getElementById('low-stock-count').textContent = lowStockCount;
+            document.getElementById('out-of-stock-count').textContent = outOfStockCount;
+
+            renderRateConfiguration(); // NEW: Render Rate Config
+            renderValueByCategoryChart();
+            renderStockStatusChart();
+            renderMonthlyCostChart();
+        }
+        
+        // NEW: Rate Configuration Logic
+        function renderRateConfiguration() {
+            var container = document.getElementById('rate-configuration-container');
+            container.innerHTML = '';
+            
+            machineCategories.filter(cat => cat !== 'Generic').forEach(cat => {
+                var currentRate = machineRates[cat] !== undefined ? machineRates[cat].toFixed(2) : 0.00;
+                
+                var rateHtml = `
+                    <div class="p-3 border rounded-lg bg-gray-50 flex flex-col items-center">
+                        <label class="text-sm font-medium text-gray-600 mb-1">${cat}</label>
+                        <div class="flex items-center">
+                            <span class="text-lg font-semibold mr-1 text-[#5D4037]">$</span>
+                            <input 
+                                type="number" 
+                                step="0.01" 
+                                value="${currentRate}" 
+                                data-machine="${cat}" 
+                                class="rate-input w-24 p-1 border rounded-md text-lg text-right font-bold focus:ring-[#795548] focus:border-[#795548]"
+                            >
+                            <span class="text-lg font-semibold ml-1 text-gray-600">/hr</span>
+                        </div>
+                    </div>
+                `;
+                container.innerHTML += rateHtml;
+            });
+
+            // Attach event listeners to the new inputs
+            document.querySelectorAll('.rate-input').forEach(input => {
+                input.addEventListener('change', handleRateChange);
+            });
+        }
+        
+        function handleRateChange(event) {
+            var target = event.target;
+            var machine = target.getAttribute('data-machine');
+            var newRate = parseFloat(target.value);
+            
+            if (isNaN(newRate) || newRate < 0) {
+                newRate = 0.00;
+                target.value = newRate.toFixed(2);
+            }
+            
+            machineRates[machine] = newRate;
+            updateFirestoreData(); // Triggers full UI refresh
+        }
+
+
+        // --- MONTHLY COST CHART LOGIC (UPDATED TO USE PURCHASES DATA) ---
+
+        function calculateMonthlyCosts(startDateString, endDateString) {
+            var monthlyCosts = {};
+
+            // Convert date strings to Date objects for comparison
+            var startDate = startDateString ? new Date(startDateString) : null;
+            var endDate = endDateString ? new Date(endDateString) : null;
+            
+            // Adjust endDate to be inclusive (set to end of the day)
+            if (endDate) {
+                endDate.setHours(23, 59, 59, 999);
+            }
+
+            // 1. Calculate Material Purchase Costs (Filter and Group)
+            if (Array.isArray(purchasesData)) {
+                purchasesData.forEach(item => {
+                    var itemDate = new Date(item.date);
+                    var isFiltered = (startDate && itemDate < startDate) || (endDate && itemDate > endDate);
+                    if (!isFiltered) {
+                        var monthKey = getMonthKey(item.date);
+                        if (!monthlyCosts[monthKey]) {
+                            monthlyCosts[monthKey] = { material: 0, maintenance: 0 };
+                        }
+                        monthlyCosts[monthKey].material += item.cost;
+                    }
+                });
+            }
+
+
+            // 2. Calculate Maintenance Costs (Filter and Group)
+            if (Array.isArray(maintenanceData)) {
+                maintenanceData.forEach(item => {
+                    var itemDate = new Date(item.date);
+                    var isFiltered = (startDate && itemDate < startDate) || (endDate && itemDate > endDate);
+                    if (!isFiltered) {
+                        var monthKey = getMonthKey(item.date);
+                        if (!monthlyCosts[monthKey]) {
+                            monthlyCosts[monthKey] = { material: 0, maintenance: 0 };
+                        }
+                        monthlyCosts[monthKey].maintenance += item.cost;
+                    }
+                });
+            }
+            
+            // Generate continuous months within the range for labels
+            var monthKeys = [];
+            
+            if (startDate && endDate && startDate <= endDate) {
+                let current = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+                let end = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
+                
+                while (current <= end) {
+                    let key = getMonthKey(current.toISOString().slice(0, 10));
+                    if (!monthlyCosts[key]) {
+                        // Ensure keys are present even if cost is zero for charting continuity
+                        monthlyCosts[key] = { material: 0, maintenance: 0 };
+                    }
+                    monthKeys.push(key);
+                    current.setMonth(current.getMonth() + 1);
+                }
+            } else {
+                // If no valid range is set, sort existing keys to prevent chart error
+                monthKeys = Object.keys(monthlyCosts).sort();
+            }
+
+
+            var labels = monthKeys.map(getMonthLabel);
+            var materialData = monthKeys.map(key => monthlyCosts[key].material);
+            var maintenanceDataForChart = monthKeys.map(key => monthlyCosts[key].maintenance);
+            var totalCostData = monthKeys.map(key => monthlyCosts[key].material + monthlyCosts[key].maintenance);
+
+
+            return { labels, materialData, maintenanceData: maintenanceDataForChart, totalCostData, sortedKeys: monthKeys };
+        }
+
+        var costChartInstance;
+        function renderMonthlyCostChart() {
+            // Read filters
+            var startDateString = document.getElementById('cost-start-date').value;
+            var endDateString = document.getElementById('cost-end-date').value;
+
+            var costData = calculateMonthlyCosts(startDateString, endDateString); 
+            var ctx = document.getElementById('monthlyCostChart').getContext('2d');
+            
+            if (costChartInstance) costChartInstance.destroy();
+            costChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: costData.labels,
+                    datasets: [
+                        {
+                            label: 'Maintenance Cost',
+                            data: costData.maintenanceData,
+                            backgroundColor: '#795548', // Brown
+                            stack: 'Stack 1',
+                        },
+                        {
+                            label: 'Material Purchase Cost', // Label updated
+                            data: costData.materialData,
+                            backgroundColor: '#A1887F', // Muted Brown
+                            stack: 'Stack 1',
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            stacked: true,
+                            title: {
+                                display: true,
+                                text: 'Month'
+                            }
+                        },
+                        y: {
+                            stacked: true,
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Cost ($)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(tooltipItems) {
+                                    var item = tooltipItems[0];
+                                    var label = item.chart.data.labels[item.dataIndex];
+                                    if (Array.isArray(label)) {
+                                      return label.join(' ');
+                                    } else {
+                                      return label;
+                                    }
+                                },
+                                label: function(context) {
+                                    var label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.y !== null) {
+                                        label += new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(context.parsed.y);
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        // --- END MONTHLY COST CHART LOGIC ---
+
+
+        // --- DATA PROCESSING AND RENDERING (INVENTORY) ---
+
+        function renderInventoryTable() {
+            var machineFilter = document.getElementById('machine-filter').value;
+            var statusFilter = document.getElementById('status-filter').value;
+            var colorFilter = document.getElementById('color-filter').value;
+            var inventoryContainer = document.getElementById('inventory-details-container');
+            inventoryContainer.innerHTML = '';
+            
+            var availableColors = getUniqueColors();
+
+            // 1. Filter Data
+            var filteredData = inventoryData.filter(item => {
+                var machineMatch = machineFilter === 'all' || item.machine === machineFilter;
+                var statusMatch = statusFilter === 'all' || item.status === statusFilter;
+                var colorMatch = colorFilter === 'all' || item.color === colorFilter;
+                return machineMatch && statusMatch && colorMatch;
+            });
+
+            if (filteredData.length === 0) {
+                 inventoryContainer.innerHTML = '<div class="text-center py-4 text-gray-500">No items match the current filters.</div>';
+                 return;
+            }
+            
+            // 2. Group Data
+            var groupedData = {};
+            filteredData.forEach(item => {
+                if (!groupedData[item.machine]) {
+                    groupedData[item.machine] = [];
+                }
+                groupedData[item.machine].push(item);
+            });
+            
+            // 3. Render Sections (sorted by machine name)
+            var machineNames = Object.keys(groupedData).sort();
+
+            machineNames.forEach(machine => {
+                var items = groupedData[machine];
+                
+                var tableHtml = `
+                    <div class="p-4 bg-[#EFEBE9] rounded-t-lg">
+                        <h4 class="text-lg font-semibold text-[#5D4037]">${machine} Inventory</h4>
+                    </div>
+                    <div class="overflow-x-auto border border-t-0 rounded-b-lg">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="table-header">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Item Name</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Color</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unit Cost</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Value</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reorder</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">
+                                ${items.map(item => {
+                                    var dataIndex = inventoryData.findIndex(i => i.id === item.id);
+                                    var statusClass = item.status === 'OK' ? 'status-ok' : item.status === 'Low Stock' ? 'status-low' : 'status-out';
+                                    return `
+                                        <tr>
+                                            <td class="px-6 py-4 whitespace-nowrap">${item.name}</td>
+                                            <td class="px-6 py-4 whitespace-nowrap">
+                                                <select 
+                                                    data-field="color" 
+                                                    data-id="${item.id}" 
+                                                    class="p-1 border rounded-md text-sm bg-gray-50 focus:ring-[#795548] focus:border-[#795548] w-28"
+                                                >
+                                                    ${availableColors.map(color => `
+                                                        <option value="${color}" ${item.color === color ? 'selected' : ''}>${color}</option>
+                                                    `).join('')}
+                                                </select>
+                                            </td>
+                                            <td class="px-6 py-4 whitespace-nowrap">
+                                                <input 
+                                                    type="number" 
+                                                    value="${item.quantity}" 
+                                                    min="0" 
+                                                    data-field="quantity" 
+                                                    class="w-20 p-1 border rounded-md text-sm text-right focus:ring-[#795548] focus:border-[#795548]"
+                                                    data-id="${item.id}"
+                                                >
+                                            </td>
+                                            <td class="px-6 py-4 whitespace-nowrap">
+                                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${statusClass}">
+                                                    ${item.status}
+                                                </span>
+                                            </td>
+                                            <td class="px-6 py-4 whitespace-nowrap">
+                                                <input 
+                                                    type="number" 
+                                                    step="0.01" 
+                                                    value="${item.unitCost.toFixed(2)}" 
+                                                    min="0" 
+                                                    data-field="unitCost" 
+                                                    class="w-24 p-1 border rounded-md text-sm text-right focus:ring-[#795548] focus:border-[#795548]"
+                                                    data-id="${item.id}"
+                                                >
+                                            </td>
+                                            <td class="px-6 py-4 whitespace-nowrap">$${item.totalValue.toFixed(2)}</td>
+                                            <td class="px-6 py-4 whitespace-nowrap">
+                                                <a href="${item.reorderLink}" target="_blank" class="text-[#795548] hover:text-[#4E342E] font-semibold">Reorder</a>
+                                            </td>
+                                            <td class="px-6 py-4 whitespace-nowrap">
+                                                <button data-id="${item.id}" class="delete-item-btn text-red-600 hover:text-red-800 font-semibold text-sm">Delete</button>
+                                            </td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+                inventoryContainer.innerHTML += tableHtml;
+            });
+        }
+        
+        function handleInventoryInputChange(event) {
+            var target = event.target;
+            if (target.closest('#inventory-details-container')) {
+                var id = parseInt(target.getAttribute('data-id'));
+                var field = target.getAttribute('data-field');
+
+                if (id === null || !field) return;
+
+                var index = inventoryData.findIndex(item => item.id === id);
+                if (index === -1) return;
+
+                if (field === 'quantity') {
+                    var newQuantity = parseInt(target.value);
+                    if (isNaN(newQuantity) || newQuantity < 0) {
+                        newQuantity = 0;
+                        target.value = 0;
+                    }
+                    inventoryData[index].quantity = newQuantity;
+                } else if (field === 'color') {
+                    inventoryData[index].color = target.value;
+                } else if (field === 'unitCost') {
+                    var newCost = parseFloat(target.value);
+                    if (isNaN(newCost) || newCost < 0) {
+                        newCost = 0.00;
+                        target.value = 0.00;
+                    }
+                    inventoryData[index].unitCost = newCost;
+                }
+                
+                // Triggers recalculation and UI refresh via the onSnapshot listener
+                updateFirestoreData(); 
+            }
+        }
+
+        function deleteInventoryItem(id) {
+            var index = inventoryData.findIndex(item => item.id === id);
+            if (index !== -1) {
+                inventoryData.splice(index, 1);
+                updateFirestoreData(); 
+            }
+        }
+
+        function handleInventoryAction(event) {
+             var target = event.target;
+             if (target.classList.contains('delete-item-btn')) {
+                var id = parseInt(target.getAttribute('data-id'));
+                deleteInventoryItem(id);
+             }
+        }
+
+        function addNewInventoryItem() {
+            var machine = document.getElementById('item-machine').value;
+            var nameInput = document.getElementById('item-name-input');
+            var nameSelect = document.getElementById('item-name-select');
+            var color = document.getElementById('item-color').value;
+            var quantity = document.getElementById('item-quantity').value;
+            var cost = document.getElementById('item-cost').value;
+            
+            var itemName = nameSelect.classList.contains('hidden') ? nameInput.value.trim() : nameSelect.value;
+            
+            if (!machine || !itemName || !color || !quantity || !cost) {
+                alert("Please fill in Machine, Item Name, Color, Quantity, and Unit Cost.");
+                return;
+            }
+            
+            var newItem = {
+                id: nextInventoryId++,
+                machine: machine,
+                name: itemName,
+                color: color,
+                quantity: parseInt(quantity) || 0,
+                unitCost: parseFloat(cost) || 0,
+                reorderPoint: 5, 
+                reorderLink: '#', 
+            };
+            
+            inventoryData.push(newItem);
+            updateFirestoreData();
+            
+            nameInput.value = '';
+            nameSelect.value = '';
+            document.getElementById('item-color').value = '';
+            document.getElementById('item-quantity').value = '';
+            document.getElementById('item-cost').value = '';
+        }
+
+        function toggleItemNameInput() {
+            var machineSelect = document.getElementById('item-machine');
+            var nameInput = document.getElementById('item-name-input');
+            var nameSelect = document.getElementById('item-name-select');
+            var selectedMachine = machineSelect.value;
+            
+            if (printerMachines.includes(selectedMachine)) {
+                nameInput.classList.add('hidden');
+                nameSelect.classList.remove('hidden');
+                nameSelect.innerHTML = printerMaterialList.map(mat => `<option value="${mat}">${mat}</option>`).join('');
+            } else {
+                nameInput.classList.remove('hidden');
+                nameSelect.classList.add('hidden');
+            }
+        }
+        
+        // --- DATA PROCESSING AND RENDERING (PURCHASES) ---
+        
+        function populatePurchaseForm() {
+            var machineSelect = document.getElementById('purchase-machine');
+            machineSelect.innerHTML = '<option value="" disabled selected>Select Machine Category</option>' + 
+                                      machineCategories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+            document.getElementById('purchase-date').valueAsDate = new Date();
+            document.getElementById('purchase-item').value = '';
+            document.getElementById('purchase-cost').value = '';
+        }
+
+        function renderMachineStoreLinks() {
+            var container = document.getElementById('machine-store-links');
+            if (!container) return; 
+
+            container.innerHTML = Object.entries(machineStoreLinks).map(([machine, url]) => `
+                <a href="${url}" target="_blank" class="block p-3 border rounded-lg shadow-sm hover:shadow-md transition-shadow bg-gray-50 hover:bg-gray-100 text-[#795548] font-medium text-center text-sm">
+                    ${machine} Store
+                </a>
+            `).join('');
+        }
+        
+        function renderPurchasesTable() {
+            var tableBody = document.getElementById('purchases-table-body');
+            tableBody.innerHTML = '';
+             
+            var sortedData = purchasesData
+                .sort((a,b) => new Date(b.date) - new Date(a.date));
+            
+            if (sortedData.length === 0) {
+                 tableBody.innerHTML = '<tr><td colspan="5" class="text-center py-4">No material purchases have been logged.</td></tr>';
+                 return;
+            }
+
+            sortedData.forEach(purchase => {
+                var row = `
+                    <tr>
+                        <td class="px-6 py-4 whitespace-nowrap">${purchase.date}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">${purchase.machine}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">${purchase.item}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right">$${purchase.cost.toFixed(2)}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <button data-id="${purchase.id}" class="delete-purchase-btn text-red-600 hover:text-red-800 font-semibold text-sm">Delete</button>
+                        </td>
+                    </tr>
+                `;
+                tableBody.innerHTML += row;
+            });
+        }
+        
+        function addNewPurchaseLog() {
+            var date = document.getElementById('purchase-date').value;
+            var item = document.getElementById('purchase-item').value.trim();
+            var machine = document.getElementById('purchase-machine').value;
+            var costValue = document.getElementById('purchase-cost').value;
+            
+            if (!date || !item || !machine || !costValue) {
+                alert("Please fill in Date, Item Name, Machine, and Total Cost to add a purchase log.");
+                return;
+            }
+            
+            var newLog = {
+                id: nextPurchaseId++,
+                date: date,
+                item: item,
+                machine: machine,
+                cost: parseFloat(costValue) || 0
+            };
+            
+            purchasesData.push(newLog);
+            updateFirestoreData();
+            populatePurchaseForm();
+        }
+        
+        function deletePurchaseLog(id) {
+            var index = purchasesData.findIndex(log => log.id === id);
+            if (index !== -1) {
+                purchasesData.splice(index, 1);
+                updateFirestoreData();
+            }
+        }
+        
+        function handlePurchaseAction(event) {
+             var target = event.target;
+             if (target.classList.contains('delete-purchase-btn')) {
+                var id = parseInt(target.getAttribute('data-id'));
+                deletePurchaseLog(id);
+             }
+        }
+
+
+        // --- DATA PROCESSING AND RENDERING (MAINTENANCE) ---
+        
+        function populateMaintenanceForm() {
+            var machineSelect = document.getElementById('log-machine');
+            machineSelect.innerHTML = machineCategories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+            document.getElementById('log-date').valueAsDate = new Date();
+            document.getElementById('log-type').value = '';
+            document.getElementById('log-cost').value = '';
+            document.getElementById('log-details').value = '';
+            document.getElementById('log-worker').value = '';
+        }
+
+        function renderMaintenanceTable() {
+            var tableBody = document.getElementById('maintenance-table-body');
+            tableBody.innerHTML = '';
+             
+            var sortedData = maintenanceData
+                .sort((a,b) => new Date(b.date) - new Date(a.date));
+            
+            if (sortedData.length === 0) {
+                 tableBody.innerHTML = '<tr><td colspan="7" class="text-center py-4">No maintenance has been logged.</td></tr>';
+                 return;
+            }
+
+            sortedData.forEach(log => {
+                var row = `
+                    <tr>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <select data-field="machine" data-id="${log.id}" class="p-1 border rounded-md bg-gray-50 text-sm w-28">
+                                ${machineCategories.map(cat => `<option value="${cat}" ${log.machine === cat ? 'selected' : ''}>${cat}</option>`).join('')}
+                            </select>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <input type="date" value="${log.date || ''}" data-field="date" data-id="${log.id}" class="w-32 p-1 border rounded-md text-sm">
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <input type="text" value="${log.type || ''}" data-field="type" data-id="${log.id}" class="w-32 p-1 border rounded-md text-sm">
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <input type="text" value="${log.worker || ''}" data-field="worker" data-id="${log.id}" class="w-28 p-1 border rounded-md text-sm">
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <input type="number" step="0.01" value="${log.cost !== undefined ? log.cost.toFixed(2) : ''}" data-field="cost" data-id="${log.id}" class="w-20 p-1 border rounded-md text-sm text-right">
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <input type="text" value="${log.details || ''}" data-field="details" data-id="${log.id}" class="w-full p-1 border rounded-md text-sm min-w-[200px]">
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <button data-id="${log.id}" class="delete-log-btn text-red-600 hover:text-red-800 font-semibold text-sm">Delete</button>
+                        </td>
+                    </tr>
+                `;
+                tableBody.innerHTML += row;
+            });
+        }
+        
+        function handleMaintenanceInput(event) {
+            var target = event.target;
+            var id = parseInt(target.getAttribute('data-id'));
+            var field = target.getAttribute('data-field');
+            
+            if (id !== null && field) {
+                var logIndex = maintenanceData.findIndex(log => log.id === id);
+                if (logIndex !== -1) {
+                    var value = target.value;
+                    if (field === 'cost') {
+                        value = parseFloat(value) || 0;
+                    }
+                    maintenanceData[logIndex][field] = value;
+                    // Triggers recalculation and UI refresh via the onSnapshot listener
+                    updateFirestoreData(); 
+                }
+            }
+        }
+        
+        function handleMaintenanceAction(event) {
+             var target = event.target;
+             if (target.classList.contains('delete-log-btn')) {
+                var id = parseInt(target.getAttribute('data-id'));
+                deleteMaintenanceLog(id);
+             }
+        }
+
+        function deleteMaintenanceLog(id) {
+            var index = maintenanceData.findIndex(log => log.id === id);
+            if (index !== -1) {
+                maintenanceData.splice(index, 1);
+                updateFirestoreData();
+            }
+        }
+
+        function addNewMaintenanceLog() {
+            var machine = document.getElementById('log-machine').value;
+            var date = document.getElementById('log-date').value;
+            var type = document.getElementById('log-type').value.trim();
+            var worker = document.getElementById('log-worker').value.trim();
+            var costValue = document.getElementById('log-cost').value;
+            var details = document.getElementById('log-details').value.trim();
+            
+            if (!machine || !date || !type || !worker || !costValue) {
+                alert("Please fill in Machine, Date, Type, Worker, and Cost to add a new log.");
+                return;
+            }
+            
+            var newLog = {
+                id: nextMaintenanceId++,
+                machine: machine,
+                date: date,
+                type: type,
+                worker: worker,
+                details: details,
+                cost: parseFloat(costValue) || 0
+            };
+            
+            maintenanceData.push(newLog);
+            updateFirestoreData();
+            populateMaintenanceForm(); 
+        }
+
+        // --- DATA PROCESSING AND RENDERING (REQUESTS) ---
+        
+        function populateRequestForm() {
+            var mediaSelect = document.getElementById('req-media');
+            mediaSelect.innerHTML = '<option value="" disabled selected>Select Media Type</option>' + 
+                                    rolandMediaTypes.map(media => `<option value="${media}">${media}</option>`).join('');
+            document.getElementById('req-name').value = '';
+            document.getElementById('req-size').value = '';
+            document.getElementById('req-quantity').value = 1;
+        }
+
+        function deleteRequest(id) {
+            var index = rolandRequests.findIndex(req => req.id === id);
+            if (index !== -1) {
+                rolandRequests.splice(index, 1);
+                updateFirestoreData();
+                renderRequestTable();
+            }
+        }
+
+        function renderRequestTable() {
+            var tableBody = document.getElementById('requests-table-body');
+            tableBody.innerHTML = '';
+             
+            var sortedData = rolandRequests
+                .sort((a,b) => new Date(b.date) - new Date(a.date));
+            
+            if (sortedData.length === 0) {
+                 tableBody.innerHTML = '<tr><td colspan="6" class="text-center py-4">No active print requests.</td></tr>';
+                 return;
+            }
+
+            sortedData.forEach(req => {
+                var statusClass = req.status === 'Completed' ? 'status-completed' : 'status-pending';
+                
+                var completeButton = req.status === 'Pending' ? 
+                    `<button data-id="${req.id}" class="complete-req-btn bg-[#795548] text-white py-1 px-3 rounded-md text-xs hover:bg-[#5D4037]">Complete</button>` :
+                    `<span class="text-gray-500 text-xs">Job Finished</span>`;
+
+                var deleteButton = `<button data-id="${req.id}" class="delete-req-btn text-red-600 hover:text-red-800 font-semibold text-sm ml-2">Delete</button>`;
+                    
+                var row = `
+                    <tr>
+                        <td class="px-6 py-4 whitespace-nowrap">${req.date}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">${req.requestedBy}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">${req.media}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">${req.specs}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${statusClass}">
+                                ${req.status}
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap flex items-center">
+                            ${completeButton}
+                            ${deleteButton}
+                        </td>
+                    </tr>
+                `;
+                tableBody.innerHTML += row;
+            });
+        }
+        
+        function addNewRequest() {
+            var name = document.getElementById('req-name').value.trim();
+            var size = document.getElementById('req-size').value.trim();
+            var media = document.getElementById('req-media').value;
+            var type = document.getElementById('req-type').value;
+            var quantity = document.getElementById('req-quantity').value;
+            var date = new Date().toISOString().slice(0, 10);
+            
+            if (!name || !size || !media || !type || !quantity || quantity < 1) {
+                alert("Please fill in Requested By, Size, Media Type, Type, and Quantity.");
+                return;
+            }
+            
+            var newRequest = {
+                id: nextRequestId++,
+                date: date,
+                requestedBy: name,
+                media: media,
+                specs: `${size}, ${type}, Qty ${quantity}`,
+                status: 'Pending'
+            };
+            
+            rolandRequests.push(newRequest);
+            updateFirestoreData();
+            renderRequestTable();
+            populateRequestForm(); 
+        }
+        
+        function handleRequestAction(event) {
+             var target = event.target;
+             if (target.classList.contains('complete-req-btn')) {
+                var id = parseInt(target.getAttribute('data-id'));
+                markRequestCompleted(id);
+             } else if (target.classList.contains('delete-req-btn')) {
+                var id = parseInt(target.getAttribute('data-id'));
+                deleteRequest(id);
+             }
+        }
+
+        function markRequestCompleted(id) {
+            var reqIndex = rolandRequests.findIndex(req => req.id === id);
+            if (reqIndex !== -1) {
+                rolandRequests[reqIndex].status = 'Completed';
+                updateFirestoreData();
+                renderRequestTable();
+            }
+        }
+        
+        // --- DATA PROCESSING AND RENDERING (CLASSES) ---
+        
+        function populateClassForm() {
+            var machineSelect = document.getElementById('class-machine');
+            machineSelect.innerHTML = machineCategories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+            document.getElementById('class-date').valueAsDate = new Date();
+            document.getElementById('class-topic').value = '';
+            document.getElementById('class-duration').value = '';
+            document.getElementById('class-attendees').value = '';
+        }
+        
+        function calculateMonthlyClasses() {
+            var monthlyClassCounts = {};
+            var today = new Date();
+            var sixMonthsAgo = new Date();
+            sixMonthsAgo.setMonth(today.getMonth() - 5);
+            sixMonthsAgo.setDate(1); 
+            
+            var monthKeys = [];
+            for (let i = 0; i < 6; i++) {
+                let d = new Date(today);
+                d.setMonth(today.getMonth() - i);
+                let key = getMonthKey(d.toISOString().slice(0, 10));
+                monthKeys.unshift(key); 
+                monthlyClassCounts[key] = 0;
+            }
+            
+            classScheduleData.forEach(c => {
+                var classDate = new Date(c.date);
+                if (classDate >= sixMonthsAgo) {
+                    var monthKey = getMonthKey(c.date);
+                    if (monthlyClassCounts.hasOwnProperty(monthKey)) {
+                        monthlyClassCounts[monthKey]++;
+                    }
+                }
+            });
+            
+            var labels = monthKeys.map(getMonthLabel);
+            var classData = monthKeys.map(key => monthlyClassCounts[key]);
+            
+            return { labels, classData };
+        }
+
+        var classCostChartInstance;
+        function renderClassCostCorrelationChart() {
+            var classData = calculateMonthlyClasses();
+            var costData = calculateMonthlyCosts(
+                document.getElementById('cost-start-date').value, 
+                document.getElementById('cost-end-date').value
+            ); 
+            var ctx = document.getElementById('classCostCorrelationChart').getContext('2d');
+            
+            var combinedLabels = costData.labels;
+            var classCounts = classData.classData;
+            var totalCosts = costData.totalCostData;
+
+            if (classCostChartInstance) classCostChartInstance.destroy();
+            classCostChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: combinedLabels,
+                    datasets: [
+                        {
+                            label: 'Total Operational Cost',
+                            data: totalCosts,
+                            backgroundColor: '#795548', 
+                            yAxisID: 'y-cost',
+                        },
+                        {
+                            label: 'Number of Classes',
+                            data: classCounts,
+                            borderColor: '#A1887F', 
+                            borderWidth: 3,
+                            type: 'line',
+                            fill: false,
+                            yAxisID: 'y-class',
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: {
+                        'y-cost': {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            title: {
+                                display: true,
+                                text: 'Cost ($)'
+                            }
+                        },
+                        'y-class': {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            title: {
+                                display: true,
+                                text: 'Classes'
+                            },
+                            grid: {
+                                drawOnChartArea: false, 
+                            },
+                            ticks: {
+                                stepSize: 1
+                            }
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(tooltipItems) {
+                                    var item = tooltipItems[0];
+                                    return item.chart.data.labels[item.dataIndex];
+                                },
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderClassLogTable() {
+            var tableBody = document.getElementById('class-table-body');
+            tableBody.innerHTML = '';
+             
+            var sortedData = classScheduleData
+                .sort((a,b) => new Date(b.date) - new Date(a.date));
+            
+            if (sortedData.length === 0) {
+                 tableBody.innerHTML = '<tr><td colspan="6" class="text-center py-4">No classes have been logged.</td></tr>';
+                 return;
+            }
+
+            sortedData.forEach(c => {
+                var row = `
+                    <tr>
+                        <td class="px-6 py-4 whitespace-nowrap">${c.date}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">${c.machine}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">${c.topic}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right">${c.durationHours}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right">${c.attendees}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <button data-id="${c.id}" class="delete-class-btn text-red-600 hover:text-red-800 font-semibold text-sm">Delete</button>
+                        </td>
+                    </tr>
+                `;
+                tableBody.innerHTML += row;
+            });
+        }
+        
+        function addNewClassLog() {
+            var date = document.getElementById('class-date').value;
+            var machine = document.getElementById('class-machine').value;
+            var topic = document.getElementById('class-topic').value.trim();
+            var duration = document.getElementById('class-duration').value;
+            var attendees = document.getElementById('class-attendees').value;
+            
+            if (!date || !machine || !topic || !duration || !attendees) {
+                alert("Please fill in Date, Machine, Topic, Duration, and Attendees to add a new class.");
+                return;
+            }
+            
+            var newClass = {
+                id: nextClassId++,
+                date: date,
+                machine: machine,
+                topic: topic,
+                durationHours: parseFloat(duration) || 0,
+                attendees: parseInt(attendees) || 0
+            };
+            
+            classScheduleData.push(newClass);
+            updateFirestoreData();
+            renderClassLogTable();
+            renderClassCostCorrelationChart();
+            populateClassForm(); 
+        }
+        
+        function deleteClassLog(id) {
+            var index = classScheduleData.findIndex(c => c.id === id);
+            if (index !== -1) {
+                classScheduleData.splice(index, 1);
+                updateFirestoreData();
+            }
+        }
+        
+        function handleClassAction(event) {
+             var target = event.target;
+             if (target.classList.contains('delete-class-btn')) {
+                var id = parseInt(target.getAttribute('data-id'));
+                deleteClassLog(id);
+             }
+        }
+
+
+        // --- CHARTS ---
+        var valueChartInstance, statusChartInstance;
+        var chartColors = ['#A1887F', '#D7CCC8', '#795548', '#BCAAA4', '#5D4037', '#B39DDB'];
+
+        function renderValueByCategoryChart() {
+            var ctx = document.getElementById('valueByCategoryChart').getContext('2d');
+            var dataByCategory = machineCategories.map(cat => {
+                return inventoryData
+                    .filter(item => item.machine === cat)
+                    .reduce((sum, item) => sum + item.totalValue, 0);
+            }).slice(0, -1); 
+
+            if(valueChartInstance) valueChartInstance.destroy();
+            valueChartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: machineCategories.slice(0, -1),
+                    datasets: [{
+                        label: 'Inventory Value',
+                        data: dataByCategory,
+                        backgroundColor: chartColors,
+                        borderColor: '#f5f5f5',
+                        borderWidth: 2,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                        },
+                    }
+                }
+            });
+        }
+        
+        function renderStockStatusChart() {
+            var ctx = document.getElementById('stockStatusChart').getContext('2d');
+            var statusCounts = { OK: 0, 'Low Stock': 0, 'Out of Stock': 0 };
+            inventoryData.forEach(item => {
+                statusCounts[item.status]++;
+            });
+            
+            if (statusChartInstance) statusChartInstance.destroy();
+            statusChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['OK', 'Low Stock', 'Out of Stock'],
+                    datasets: [{
+                        label: 'Number of Items',
+                        data: [statusCounts.OK, statusCounts['Low Stock'], statusCounts['Out of Stock']],
+                        backgroundColor: ['#81C784', '#FFB74D', '#E57373'],
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false,
+                        }
+                    },
+                    scales: {
+                        x: {
+                            beginAtZero: true,
+                            ticks: {
+                                stepSize: 1
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        function populateFilters() {
+            machineCategories = getMachineCategories();
+            rolandMediaTypes = getRolandMediaTypes();
+            
+            var machineFilter = document.getElementById('machine-filter');
+            var itemMachineSelect = document.getElementById('item-machine');
+            var classMachineSelect = document.getElementById('class-machine');
+            
+            machineFilter.innerHTML = '<option value="all">All Machines</option>';
+            itemMachineSelect.innerHTML = '<option value="" disabled selected>Select Machine</option>';
+            classMachineSelect.innerHTML = '<option value="" disabled selected>Select Machine</option>';
+            
+            machineCategories.forEach(cat => { 
+                var option1 = document.createElement('option');
+                option1.value = cat;
+                option1.textContent = cat;
+                machineFilter.appendChild(option1);
+
+                var option2 = document.createElement('option');
+                option2.value = cat;
+                option2.textContent = cat;
+                itemMachineSelect.appendChild(option2);
+                
+                var option3 = document.createElement('option');
+                option3.value = cat;
+                option3.textContent = cat;
+                classMachineSelect.appendChild(option3);
+            });
+
+            var colorFilter = document.getElementById('color-filter');
+            var itemColorSelect = document.getElementById('item-color');
+            var uniqueColors = getUniqueColors();
+
+            colorFilter.innerHTML = '<option value="all">All Colors</option>';
+            itemColorSelect.innerHTML = '<option value="" disabled selected>Select Color</option>';
+
+            uniqueColors.forEach(color => {
+                var option1 = document.createElement('option');
+                option1.value = color;
+                option1.textContent = color;
+                colorFilter.appendChild(option1);
+
+                var option2 = document.createElement('option');
+                option2.value = color;
+                option2.textContent = color;
+                itemColorSelect.appendChild(option2);
+            });
+        }
+        
+        function initializeAppUI() {
+            // Renders all components based on the (newly loaded or updated) data
+            recalculateInventory();
+            populateFilters();
+            populatePurchaseForm(); // NEW
+            populateMaintenanceForm();
+            populateRequestForm();
+            populateClassForm();
+            renderMachineStoreLinks(); // NEW: Render store links
+            renderOverview();
+            renderInventoryTable();
+            renderPurchasesTable(); // NEW
+            renderMaintenanceTable();
+            renderRequestTable();
+            // Hide loading, show content
+            document.getElementById('loading-indicator').classList.add('hidden');
+            document.getElementById('main-content').classList.remove('hidden');
+            // Restore the user's current view after data refresh
+            changeView(currentView); 
+        }
+        
+        function initializeDateFilters() {
+             // Set Default Cost Filter Dates (Last 6 Months)
+            var today = new Date();
+            var startDate = new Date();
+            // Go back 5 months (to show 6 total months including the current one)
+            startDate.setMonth(today.getMonth() - 5);
+            startDate.setDate(1); // Start on the first day of the start month
+
+            // Format dates as YYYY-MM-DD strings
+            const formatDate = (date) => {
+                const year = date.getFullYear();
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const day = String(date.getDate()).padStart(2, '0');
+                return `${year}-${month}-${day}`;
+            };
+            
+            document.getElementById('cost-end-date').value = formatDate(today);
+            document.getElementById('cost-start-date').value = formatDate(startDate);
+        }
+
+        // --- EVENT LISTENERS ---
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('loading-indicator').classList.remove('hidden');
+
+            // Initialize Firebase and start listening for data changes
+            initializeFirebase(); 
+            
+            initializeDateFilters(); // Initialize the date inputs
+
+            // Nav buttons
+            navButtons.overview.addEventListener('click', () => changeView('overview'));
+            navButtons.inventory.addEventListener('click', () => changeView('inventory'));
+            navButtons.purchases.addEventListener('click', () => changeView('purchases')); // NEW
+            navButtons.maintenance.addEventListener('click', () => changeView('maintenance'));
+            navButtons.requests.addEventListener('click', () => changeView('requests'));
+            navButtons.classes.addEventListener('click', () => changeView('classes'));
+            document.getElementById('export-pdf-btn').addEventListener('click', exportOverviewToPdf);
+            
+            // Cost Filter Button (NEW)
+            document.getElementById('apply-cost-filter-btn').addEventListener('click', renderOverview);
+
+            // Inventory events
+            document.getElementById('machine-filter').addEventListener('change', renderInventoryTable);
+            document.getElementById('status-filter').addEventListener('change', renderInventoryTable);
+            document.getElementById('color-filter').addEventListener('change', renderInventoryTable);
+            document.getElementById('view-inventory').addEventListener('change', handleInventoryInputChange);
+            document.getElementById('inventory-details-container').addEventListener('click', handleInventoryAction);
+            document.getElementById('add-item-btn').addEventListener('click', addNewInventoryItem);
+            document.getElementById('item-machine').addEventListener('change', toggleItemNameInput);
+            
+            // Purchase events (NEW)
+            document.getElementById('add-purchase-btn').addEventListener('click', addNewPurchaseLog);
+            document.getElementById('purchases-table-body').addEventListener('click', handlePurchaseAction);
+            
+            // Maintenance events
+            document.getElementById('maintenance-table-body').addEventListener('change', handleMaintenanceInput);
+            document.getElementById('maintenance-table-body').addEventListener('click', handleMaintenanceAction);
+            document.getElementById('add-log-btn').addEventListener('click', addNewMaintenanceLog);
+            
+            // Request events
+            document.getElementById('add-request-btn').addEventListener('click', addNewRequest);
+            document.getElementById('requests-table-body').addEventListener('click', handleRequestAction);
+            
+            // Class events
+            document.getElementById('add-class-btn').addEventListener('click', addNewClassLog);
+            document.getElementById('class-table-body').addEventListener('click', handleClassAction);
+        });
+    </script>
+</body>
+</html>
